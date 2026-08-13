@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "http://gorevive.jbbs.in/api/:path*"
+    },
+    {
+      "source": "/master/:path*",
+      "destination": "http://gorevive.jbbs.in/master/:path*"
+    },
+    {
+      "source": "/includes/:path*",
+      "destination": "http://gorevive.jbbs.in/includes/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
