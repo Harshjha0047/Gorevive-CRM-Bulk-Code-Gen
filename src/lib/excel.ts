@@ -6,7 +6,6 @@ import {
   findExactMatch,
   suggestClosest,
   describeCharDiff,
-  type MasterData,
 } from './apiUtils';
 
 export const COLUMN_MAPPING: Record<string, string> = {
@@ -54,8 +53,9 @@ const STATIC_DROPDOWN_FIELDS = [
   'display_size',
 ] as const;
 
-// Free-text fields with no dropdown behind them — no exact-match check needed.
-const FREE_TEXT_FIELDS = new Set(['op_drive']);
+// op_drive is free-text — it's simply never checked against any dropdown
+// map (not in STATIC_DROPDOWN_FIELDS, not brand/category/model/sub-category,
+// not keyboard/model_typenew), so it passes through untouched by default.
 
 export const downloadTemplate = () => {
   const headers = Object.keys(COLUMN_MAPPING);
