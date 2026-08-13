@@ -70,30 +70,229 @@ export const downloadTemplate = () => {
  * Builds a "did you mean X?" hint for the error message, or a generic
  * "no match at all" message if nothing close was found.
  */
-function buildMismatchError(fieldLabel: string, rawValue: string, map: Record<string, string>): string {
+export interface FieldError {
+  message: string;
+  suggestion?: string;
+}
+
+function buildFieldError(fieldLabel: string, rawValue: string, map: Record<string, string>): FieldError {
   if (!rawValue) {
-    return `${fieldLabel} is required.`;
+    return { message: `${fieldLabel} is required.` };
   }
 
   const suggestion = suggestClosest(map, rawValue);
   if (!suggestion) {
-    return `"${rawValue}" was not found in the system's ${fieldLabel} list.`;
+    return { message: `"${rawValue}" was not found in the system's ${fieldLabel} list.` };
   }
 
   const diff = describeCharDiff(rawValue, suggestion);
 
-  // Full diagnostic in the console — includes every char code, so even
-  // invisible/unicode differences (non-breaking space, en-dash, etc.) are
-  // visible if you need to inspect further.
   console.warn(
     `[${fieldLabel} mismatch]`,
     `\n  Your value:    "${rawValue}"  codes: [${Array.from(rawValue).map((c) => c.charCodeAt(0)).join(', ')}]`,
     `\n  Closest match: "${suggestion}"  codes: [${Array.from(suggestion).map((c) => c.charCodeAt(0)).join(', ')}]`
   );
 
-  return diff
+  const message = diff
     ? `"${rawValue}" does not exactly match "${suggestion}". ${diff}`
     : `"${rawValue}" does not exactly match "${suggestion}" — check for extra/missing spaces or different capitalization.`;
+
+  return { message, suggestion };
+}
+
+/**
+ * Resolves the brand ID for a row from its raw (human-readable) brand text.
+ * Returns null if the brand doesn't exactly match anything.
+ */
+async function resolveBrandId(original: Record<string, string>): Promise<string | null> {
+  const master = await fetchMasterData();
+  return findExactMatch(master.make || {}, original.make || '');
+}
+
+/**
+ * Resolves the category ID for a row, given it already has a valid brand.
+ */
+async function resolveCategoryId(original: Record<string, string>, brandId: string): Promise<string | null> {
+  const categoryMap = await fetchDynamicMap('getProductName_master', brandId);
+  return findExactMatch(categoryMap, original.product_name || '');
+}
+
+/**
+ * Validates + translates a SINGLE row's raw (human-readable) field values
+ * into backend codes. Used both for the initial bulk parse AND for
+ * re-validating a single row after an inline "apply suggestion" / "pick
+ * from list" edit — same logic, one source of truth.
+ *
+ * NOTE: relies on fetchDynamicMap's internal cache (in apiUtils.ts), so
+ * calling this repeatedly for the same brand/category costs no extra
+ * network requests after the first time.
+ */
+export async function validateRow(rawOriginal: Record<string, string>): Promise<{
+  data: Record<string, string>;
+  errors: Record<string, FieldError>;
+  isValid: boolean;
+}> {
+  const master = await fetchMasterData();
+  const mappedData: Record<string, string> = { ...rawOriginal };
+  const errors: Record<string, FieldError> = {};
+
+  // --- Brand ---
+  const rawBrand = mappedData.make;
+  const brandId = findExactMatch(master.make || {}, rawBrand);
+  if (brandId) {
+    mappedData.make = brandId;
+  } else {
+    errors.make = buildFieldError('Brand', rawBrand, master.make || {});
+  }
+
+  // --- Category (depends on brand) ---
+  let categoryId: string | null = null;
+  if (brandId) {
+    const categoryMap = await fetchDynamicMap('getProductName_master', brandId);
+    const rawCategory = mappedData.product_name;
+    categoryId = findExactMatch(categoryMap, rawCategory);
+    if (categoryId) {
+      mappedData.product_name = categoryId;
+    } else {
+      errors.product_name = buildFieldError('Category', rawCategory, categoryMap);
+    }
+  } else if (mappedData.product_name) {
+    errors.product_name = { message: 'Cannot verify Category — Brand did not match, so the Category list is unknown.' };
+  } else {
+    errors.product_name = { message: 'Category Name is required.' };
+  }
+
+  // --- Model (depends on brand) ---
+  if (brandId) {
+    const modelMap = await fetchDynamicMap('getModel_masterlist', brandId);
+    const rawModel = mappedData.model;
+    const modelId = findExactMatch(modelMap, rawModel);
+    if (modelId) {
+      mappedData.model = modelId;
+    } else {
+      errors.model = buildFieldError('Model', rawModel, modelMap);
+    }
+  } else if (mappedData.model) {
+    errors.model = { message: 'Cannot verify Model — Brand did not match, so the Model list is unknown.' };
+  } else {
+    errors.model = { message: 'Model Name is required.' };
+  }
+
+  // --- Sub Category (depends on category) ---
+  if (categoryId) {
+    const subMap = await fetchDynamicMap('getsubProductName_master', categoryId);
+    const rawSub = mappedData.sub_producd;
+    const subId = findExactMatch(subMap, rawSub);
+    if (subId) {
+      mappedData.sub_producd = subId;
+    } else {
+      errors.sub_producd = buildFieldError('Sub Category', rawSub, subMap);
+    }
+  } else if (mappedData.sub_producd) {
+    errors.sub_producd = { message: 'Cannot verify Sub Category — Category did not match, so the Sub Category list is unknown.' };
+  } else {
+    errors.sub_producd = { message: 'Sub Category is required.' };
+  }
+
+  // --- Static dropdown fields ---
+  STATIC_DROPDOWN_FIELDS.forEach((field) => {
+    const rawValue = mappedData[field];
+    if (!rawValue) {
+      if (REQUIRED_FIELDS.has(field)) {
+        errors[field] = { message: `${field} is required.` };
+      }
+      return;
+    }
+    const fieldMap = master[field] || {};
+    const matchedValue = findExactMatch(fieldMap, rawValue);
+    if (matchedValue) {
+      mappedData[field] = matchedValue;
+    } else {
+      errors[field] = buildFieldError(field, rawValue, fieldMap);
+    }
+  });
+
+  // --- Keyboard ---
+  if (mappedData.keyboard) {
+    const keyboardMap = master.keyboard || {};
+    const matched = findExactMatch(keyboardMap, mappedData.keyboard);
+    if (matched) {
+      mappedData.keyboard = matched;
+    } else {
+      errors.keyboard = buildFieldError('Keyboard', mappedData.keyboard, keyboardMap);
+    }
+  }
+
+  // --- Is New ---
+  if (mappedData.model_typenew) {
+    const isNewMap = master.model_typenew || {};
+    const matched = findExactMatch(isNewMap, mappedData.model_typenew);
+    if (matched) {
+      mappedData.model_typenew = matched;
+    } else {
+      errors.model_typenew = buildFieldError('Is New', mappedData.model_typenew, isNewMap);
+    }
+  }
+
+  // --- Structural validation on top (types, required-ness, etc.) ---
+  const validationResult = bulkModelSchema.safeParse(mappedData);
+  if (!validationResult.success) {
+    validationResult.error.issues.forEach((issue) => {
+      const key = String(issue.path[0]);
+      if (!errors[key]) {
+        errors[key] = { message: issue.message };
+      }
+    });
+  }
+
+  const isValid = Object.keys(errors).length === 0;
+
+  return {
+    data: isValid ? (validationResult.data as BulkModelPayload) : mappedData,
+    errors,
+    isValid,
+  };
+}
+
+/**
+ * Returns the list of valid display-text options for a field, given the
+ * row's CURRENT (possibly still-invalid) values — e.g. category options
+ * depend on which brand is currently set. Used to power an inline
+ * "pick from list" dropdown in the UI. Returns [] if a dependency
+ * (like brand) isn't resolved yet.
+ */
+export async function getFieldOptions(fieldKey: string, original: Record<string, string>): Promise<string[]> {
+  const master = await fetchMasterData();
+
+  if (fieldKey === 'make' || fieldKey === 'keyboard' || fieldKey === 'model_typenew' ||
+      (STATIC_DROPDOWN_FIELDS as readonly string[]).includes(fieldKey)) {
+    return Object.keys(master[fieldKey] || {});
+  }
+
+  if (fieldKey === 'product_name') {
+    const brandId = await resolveBrandId(original);
+    if (!brandId) return [];
+    const categories = await fetchDynamicMap('getProductName_master', brandId);
+    return Object.keys(categories);
+  }
+
+  if (fieldKey === 'model') {
+    const brandId = await resolveBrandId(original);
+    if (!brandId) return [];
+    const models = await fetchDynamicMap('getModel_masterlist', brandId);
+    return Object.keys(models);
+  }
+
+  if (fieldKey === 'sub_producd') {
+    const brandId = await resolveBrandId(original);
+    if (!brandId) return [];
+    const categoryId = await resolveCategoryId(original, brandId);
+    if (!categoryId) return [];
+    const subs = await fetchDynamicMap('getsubProductName_master', categoryId);
+    return Object.keys(subs);
+  }
+
+  return []; // free-text fields (op_drive) have no fixed list
 }
 
 export const parseAndValidateExcel = async (
@@ -114,169 +313,34 @@ export const parseAndValidateExcel = async (
         // string coercion touching whitespace.
         const rawJson: any[] = XLSX.utils.sheet_to_json(worksheet, { defval: '', raw: true });
 
-        // Static master data (make, hsn_code, ram_cap, strg1, strg2,
-        // cpu_core, cpu_gen, cpu_speed, color, gpu_type, gpu_cap,
-        // display_type, display_size, keyboard, model_typenew).
-        const master: MasterData = await fetchMasterData();
-
-        // Per-brand / per-category caches, filled in as we go row by row
-        // so we never call the same API twice for the same brand/category.
-        const categoryMapsByBrand: Record<string, Record<string, string>> = {};
-        const modelMapsByBrand: Record<string, Record<string, string>> = {};
-        const subCategoryMapsByCategory: Record<string, Record<string, string>> = {};
-
         const total = rawJson.length;
         const validatedRows: ValidatedRow[] = [];
 
         // ---- Sequential, row-by-row processing (the "queue") ----
+        // fetchDynamicMap() caches internally, so repeated brands/categories
+        // across rows cost no extra network calls after the first hit.
         for (let index = 0; index < rawJson.length; index++) {
           const row = rawJson[index];
           onProgress?.(index + 1, total);
 
-          const mappedData: Record<string, string> = {};
+          const original: Record<string, string> = {};
           Object.keys(COLUMN_MAPPING).forEach((excelHeader) => {
             const apiKey = COLUMN_MAPPING[excelHeader];
             const cell = row[excelHeader];
             // No trimming: an extra space in the Excel cell must surface
             // as a mismatch, not get silently cleaned away.
-            mappedData[apiKey] = cell !== undefined && cell !== null ? String(cell) : '';
+            original[apiKey] = cell !== undefined && cell !== null ? String(cell) : '';
           });
 
-          // Snapshot exactly what the user typed, for display in the UI.
-          const original: Record<string, string> = { ...mappedData };
-          const errors: Record<string, string> = {};
-
-          // --- Brand ---
-          const rawBrand = mappedData.make;
-          const brandId = findExactMatch(master.make || {}, rawBrand);
-          if (brandId) {
-            mappedData.make = brandId;
-          } else {
-            errors.make = buildMismatchError('Brand', rawBrand, master.make || {});
-          }
-
-          // --- Category (depends on brand) ---
-          let categoryId: string | null = null;
-          if (brandId) {
-            if (!categoryMapsByBrand[brandId]) {
-              categoryMapsByBrand[brandId] = await fetchDynamicMap('getProductName_master', brandId);
-            }
-            const categoryMap = categoryMapsByBrand[brandId];
-            const rawCategory = mappedData.product_name;
-            categoryId = findExactMatch(categoryMap, rawCategory);
-            if (categoryId) {
-              mappedData.product_name = categoryId;
-            } else {
-              errors.product_name = buildMismatchError('Category', rawCategory, categoryMap);
-            }
-          } else if (mappedData.product_name) {
-            errors.product_name = 'Cannot verify Category — Brand did not match, so the Category list is unknown.';
-          } else {
-            errors.product_name = 'Category Name is required.';
-          }
-
-          // --- Model (depends on brand) ---
-          if (brandId) {
-            if (!modelMapsByBrand[brandId]) {
-              modelMapsByBrand[brandId] = await fetchDynamicMap('getModel_masterlist', brandId);
-            }
-            const modelMap = modelMapsByBrand[brandId];
-            const rawModel = mappedData.model;
-            const modelId = findExactMatch(modelMap, rawModel);
-            if (modelId) {
-              mappedData.model = modelId;
-            } else {
-              errors.model = buildMismatchError('Model', rawModel, modelMap);
-            }
-          } else if (mappedData.model) {
-            errors.model = 'Cannot verify Model — Brand did not match, so the Model list is unknown.';
-          } else {
-            errors.model = 'Model Name is required.';
-          }
-
-          // --- Sub Category (depends on category) ---
-          if (categoryId) {
-            if (!subCategoryMapsByCategory[categoryId]) {
-              subCategoryMapsByCategory[categoryId] = await fetchDynamicMap('getsubProductName_master', categoryId);
-            }
-            const subMap = subCategoryMapsByCategory[categoryId];
-            const rawSub = mappedData.sub_producd;
-            const subId = findExactMatch(subMap, rawSub);
-            if (subId) {
-              mappedData.sub_producd = subId;
-            } else {
-              errors.sub_producd = buildMismatchError('Sub Category', rawSub, subMap);
-            }
-          } else if (mappedData.sub_producd) {
-            errors.sub_producd = 'Cannot verify Sub Category — Category did not match, so the Sub Category list is unknown.';
-          } else {
-            errors.sub_producd = 'Sub Category is required.';
-          }
-
-          // --- Static dropdown fields (HSN, RAM, HDD, SSD, CPU*, Color, GPU*, Display*) ---
-          STATIC_DROPDOWN_FIELDS.forEach((field) => {
-            const rawValue = mappedData[field];
-            if (!rawValue) {
-              if (REQUIRED_FIELDS.has(field)) {
-                errors[field] = `${field} is required.`;
-              }
-              return; // optional + empty is fine
-            }
-            const fieldMap = master[field] || {};
-            const matchedValue = findExactMatch(fieldMap, rawValue);
-            if (matchedValue) {
-              mappedData[field] = matchedValue;
-            } else {
-              errors[field] = buildMismatchError(field, rawValue, fieldMap);
-            }
-          });
-
-          // --- Keyboard: "Back LIT" / "Non-Back LIT" -> Y/N ---
-          if (mappedData.keyboard) {
-            const keyboardMap = master.keyboard || {};
-            const matched = findExactMatch(keyboardMap, mappedData.keyboard);
-            if (matched) {
-              mappedData.keyboard = matched;
-            } else {
-              errors.keyboard = buildMismatchError('Keyboard', mappedData.keyboard, keyboardMap);
-            }
-          }
-
-          // --- Is New: "NEW" / "Pre-Owned" -> Y/N ---
-          if (mappedData.model_typenew) {
-            const isNewMap = master.model_typenew || {};
-            const matched = findExactMatch(isNewMap, mappedData.model_typenew);
-            if (matched) {
-              mappedData.model_typenew = matched;
-            } else {
-              errors.model_typenew = buildMismatchError('Is New', mappedData.model_typenew, isNewMap);
-            }
-          }
-
-          // Free-text fields (op_drive) pass through untouched — nothing to validate.
-          void FREE_TEXT_FIELDS;
-
-          // --- Structural validation on top (types, required-ness, etc.) ---
-          const validationResult = bulkModelSchema.safeParse(mappedData);
-          if (!validationResult.success) {
-            validationResult.error.issues.forEach((issue) => {
-              const key = String(issue.path[0]);
-              // Don't overwrite a more specific mismatch error we already have.
-              if (!errors[key]) {
-                errors[key] = issue.message;
-              }
-            });
-          }
-
-          const isValid = Object.keys(errors).length === 0;
+          const result = await validateRow(original);
 
           validatedRows.push({
             id: crypto.randomUUID(),
             rowIndex: index + 2,
-            data: isValid ? (validationResult.data as BulkModelPayload) : mappedData,
+            data: result.data,
             original,
-            isValid,
-            errors,
+            isValid: result.isValid,
+            errors: result.errors,
           });
         }
 

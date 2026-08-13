@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { FieldError } from './excel';
 
 const VALID_HSN_CODES = [
   "84713010", "84433990", "85171290", "84715000", "84733099", 
@@ -51,5 +52,5 @@ export type ValidatedRow = {
   data: Partial<BulkModelPayload>;
   original: Record<string, string>;
   isValid: boolean;
-  errors: Record<string, string>;
+   errors: Record<string, FieldError>; 
 };

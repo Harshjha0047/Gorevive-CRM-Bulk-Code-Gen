@@ -202,3 +202,49 @@ export function describeCharDiff(raw: string, expected: string): string | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Legacy submit-response parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * addmodel_new_all.php was built for popup-window submission — it replies
+ * with a raw HTML fragment like:
+ *   <script>alert('Model Already Available...');</script>
+ *   <BODY onLoad='window.close(); window.opener.location.reload(true);'></BODY>
+ * None of that JS runs when called via axios/fetch (no window.opener here),
+ * so we just get the string back. This pulls the alert() text out and
+ * classifies it as success or failure — DO NOT assume "no HTTP error" means
+ * "row was actually saved".
+ */
+export interface LegacyFormResult {
+  success: boolean;
+  message: string;
+}
+
+const FAILURE_KEYWORDS = ['already available', 'already exist', 'error', 'fail', 'invalid', 'duplicate'];
+const SUCCESS_KEYWORDS = ['added successfully', 'success', 'record added', 'saved'];
+
+export function parseLegacyFormResponse(html: string): LegacyFormResult {
+  if (typeof html !== 'string') {
+    return { success: false, message: 'Unexpected response from server (not text).' };
+  }
+
+  const match = html.match(/alert\((['"])(.*?)\1\)/i);
+  const message = match ? match[2].trim() : '';
+
+  if (!message) {
+    // No alert() found at all — treat unknown/empty responses as failures
+    // rather than silently assuming success.
+    return { success: false, message: 'No confirmation message received from server.' };
+  }
+
+  const lower = message.toLowerCase();
+  const isFailure = FAILURE_KEYWORDS.some((k) => lower.includes(k));
+  const isSuccess = SUCCESS_KEYWORDS.some((k) => lower.includes(k));
+
+  // Explicit failure keyword wins even if a success keyword also appears.
+  const success = isFailure ? false : isSuccess ? true : false;
+
+  return { success, message };
+}

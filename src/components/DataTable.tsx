@@ -1,10 +1,101 @@
-import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
+import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle, ChevronDown, Wand2 } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { COLUMN_MAPPING } from '../lib/excel';
+import { COLUMN_MAPPING, getFieldOptions } from '../lib/excel';
+import type { ValidatedRow } from '../lib/validation';
 
-// Build the column list once: [{ label: 'Brand *', key: 'make' }, ...]
-// This stays in sync automatically if COLUMN_MAPPING ever changes.
 const COLUMNS = Object.entries(COLUMN_MAPPING).map(([label, key]) => ({ label, key }));
+
+// ---------------------------------------------------------------------------
+// One cell. Plain text if no error. If there's an error, shows the message,
+// a one-click "Use '<suggestion>'" button when we have a close match, and a
+// "Pick from list" dropdown loaded on demand with every valid option.
+// ---------------------------------------------------------------------------
+function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
+  const updateRowField = useStore((s) => s.updateRowField);
+  const [showPicker, setShowPicker] = useState(false);
+  const [options, setOptions] = useState<string[] | null>(null);
+  const [loadingOptions, setLoadingOptions] = useState(false);
+
+  const value = row.original?.[fieldKey] || '';
+  const error = row.errors?.[fieldKey];
+
+  const openPicker = async () => {
+    setShowPicker((v) => !v);
+    if (options === null && !loadingOptions) {
+      setLoadingOptions(true);
+      try {
+        const opts = await getFieldOptions(fieldKey, row.original);
+        setOptions(opts);
+      } finally {
+        setLoadingOptions(false);
+      }
+    }
+  };
+
+  if (!error) {
+    return <td className="px-4 py-3">{value || '-'}</td>;
+  }
+
+  return (
+    <td className="px-4 py-3 align-top min-w-[180px]">
+      <div className="flex flex-col gap-1">
+        <span className="text-red-600 text-xs">{value || <span className="italic text-gray-400">empty</span>}</span>
+        <div className="flex items-center gap-1 text-[11px] text-red-500 max-w-xs" title={error.message}>
+          <AlertCircle className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">{error.message}</span>
+        </div>
+
+        <div className="flex items-center gap-2 mt-1">
+          {error.suggestion && (
+            <button
+              onClick={() => updateRowField(row.id, fieldKey, error.suggestion!)}
+              className="flex items-center gap-1 text-[11px] font-semibold text-green-700 bg-green-50 hover:bg-green-100 border border-green-200 rounded px-2 py-0.5 transition-colors"
+              title={`Replace with "${error.suggestion}"`}
+            >
+              <Wand2 className="w-3 h-3" />
+              Use "{error.suggestion}"
+            </button>
+          )}
+
+          <div className="relative">
+            <button
+              onClick={openPicker}
+              className="flex items-center gap-1 text-[11px] font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded px-2 py-0.5 transition-colors"
+            >
+              Pick <ChevronDown className="w-3 h-3" />
+            </button>
+
+            {showPicker && (
+              <div className="absolute z-30 mt-1 left-0 bg-white border border-gray-200 rounded-lg shadow-lg w-64 max-h-64 overflow-y-auto">
+                {loadingOptions && (
+                  <div className="px-3 py-2 text-xs text-gray-400">Loading options…</div>
+                )}
+                {!loadingOptions && options !== null && options.length === 0 && (
+                  <div className="px-3 py-2 text-xs text-gray-400">
+                    No options available — fix a field this one depends on first (e.g. Brand).
+                  </div>
+                )}
+                {!loadingOptions && options !== null && options.map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => {
+                      updateRowField(row.id, fieldKey, opt);
+                      setShowPicker(false);
+                    }}
+                    className="block w-full text-left px-3 py-1.5 text-xs hover:bg-orange-50 text-gray-700"
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </td>
+  );
+}
 
 export function DataTable() {
   const { rows, isUploading, uploadProgress, removeRow, clearRows, submitValidRows } = useStore();
@@ -83,7 +174,6 @@ export function DataTable() {
               {COLUMNS.map((col) => (
                 <th key={col.key} className="px-4 py-3">{col.label}</th>
               ))}
-              <th className="px-4 py-3">Errors (If any)</th>
               <th className="px-4 py-3 text-right sticky right-0 bg-gray-50 z-20">Action</th>
             </tr>
           </thead>
@@ -91,7 +181,7 @@ export function DataTable() {
             {rows.map((row) => (
               <tr
                 key={row.id}
-                className={`border-b hover:bg-gray-50 transition-colors ${!row.isValid ? 'bg-red-50/30' : ''}`}
+                className={`border-b hover:bg-gray-50 transition-colors align-top ${!row.isValid ? 'bg-red-50/30' : ''}`}
               >
                 <td className="px-4 py-3 sticky left-0 bg-white z-10">
                   {row.isValid ? (
@@ -104,24 +194,11 @@ export function DataTable() {
                   {row.rowIndex}
                 </td>
 
-                {/* Human-readable values — brand name, category name, "NEW", etc.
-                    pulled from `original`, not the translated IDs in `data`. */}
+                {/* Each dropdown-backed cell can show its own inline fix UI. */}
                 {COLUMNS.map((col) => (
-                  <td key={col.key} className="px-4 py-3">
-                    {row.original?.[col.key] || '-'}
-                  </td>
+                  <FieldCell key={col.key} row={row} fieldKey={col.key} />
                 ))}
 
-                <td className="px-4 py-3">
-                  {!row.isValid && (
-                    <div className="flex items-center text-red-600 max-w-xs overflow-hidden text-ellipsis">
-                      <AlertCircle className="w-4 h-4 mr-1 flex-shrink-0" />
-                      <span className="truncate" title={Object.values(row.errors).join(', ')}>
-                        {Object.values(row.errors).join(', ')}
-                      </span>
-                    </div>
-                  )}
-                </td>
                 <td className="px-4 py-3 text-right sticky right-0 bg-white z-10">
                   <button
                     onClick={() => removeRow(row.id)}
