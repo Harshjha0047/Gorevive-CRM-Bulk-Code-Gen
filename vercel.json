@@ -2,15 +2,15 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "http://gorevive.jbbs.in/api/:path*"
+      "destination": "https://gorevive.jbbs.in/:path*"
     },
     {
       "source": "/master/:path*",
-      "destination": "http://gorevive.jbbs.in/master/:path*"
+      "destination": "https://gorevive.jbbs.in/master/:path*"
     },
     {
       "source": "/includes/:path*",
-      "destination": "http://gorevive.jbbs.in/includes/:path*"
+      "destination": "https://gorevive.jbbs.in/includes/:path*"
     },
     {
       "source": "/(.*)",
