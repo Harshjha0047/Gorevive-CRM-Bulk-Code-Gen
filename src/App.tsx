@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Login } from './components/Login';
 import { Uploader } from './components/Uploader';
 import { DataTable } from './components/DataTable';

@@ -9,7 +9,7 @@ const VALID_HSN_CODES = [
   "850410", "85071000", "847330", "85363000", "997331", "3208"
 ];
 
-const VALID_COLORS = ["BLACK", "White", "Silver", "Red", "Grey", "Golden", "Blue", ""];
+// const VALID_COLORS = ["BLACK", "White", "Silver", "Red", "Grey", "Golden", "Blue", ""];
 
 export const bulkModelSchema = z.object({
   make: z.string().min(1, "Brand is required"),

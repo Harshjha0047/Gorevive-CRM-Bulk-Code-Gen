@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { UploadCloud, FileSpreadsheet, Download, Loader2 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone'; 
 import { downloadTemplate, parseAndValidateExcel } from '../lib/excel';
