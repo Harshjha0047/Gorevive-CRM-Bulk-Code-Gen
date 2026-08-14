@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle, ChevronDown, Wand2 } from 'lucide-react';
+import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle, ChevronDown, Wand2, Download } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { COLUMN_MAPPING, getFieldOptions } from '../lib/excel';
+import { COLUMN_MAPPING, getFieldOptions, downloadResults } from '../lib/excel';
 import type { ValidatedRow } from '../lib/validation';
 
 const COLUMNS = Object.entries(COLUMN_MAPPING).map(([label, key]) => ({ label, key }));
@@ -98,12 +98,13 @@ function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
 }
 
 export function DataTable() {
-  const { rows, isUploading, uploadProgress, removeRow, clearRows, submitValidRows } = useStore();
+  const { rows, results, isUploading, uploadProgress, removeRow, clearRows, submitValidRows } = useStore();
 
   if (rows.length === 0) return null;
 
   const validCount = rows.filter((r) => r.isValid).length;
   const invalidCount = rows.length - validCount;
+  const hasResults = Object.keys(results).length > 0;
 
   const progressPercentage = uploadProgress.total > 0
     ? Math.round((uploadProgress.current / uploadProgress.total) * 100)
@@ -133,6 +134,15 @@ export function DataTable() {
           >
             Clear All
           </button>
+          {hasResults && (
+            <button
+              onClick={() => downloadResults(rows, results)}
+              className="flex items-center px-4 py-2 text-sm font-bold text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Download className="w-4 h-4 mr-2 text-orange-500" />
+              Download Results
+            </button>
+          )}
           <button
             onClick={submitValidRows}
             disabled={isUploading || validCount === 0}
@@ -174,6 +184,7 @@ export function DataTable() {
               {COLUMNS.map((col) => (
                 <th key={col.key} className="px-4 py-3">{col.label}</th>
               ))}
+              {hasResults && <th className="px-4 py-3">Model Code</th>}
               <th className="px-4 py-3 text-right sticky right-0 bg-gray-50 z-20">Action</th>
             </tr>
           </thead>
@@ -198,6 +209,31 @@ export function DataTable() {
                 {COLUMNS.map((col) => (
                   <FieldCell key={col.key} row={row} fieldKey={col.key} />
                 ))}
+
+                {hasResults && (
+                  <td className="px-4 py-3">
+                    {results[row.id] ? (
+                      <div className="flex flex-col gap-0.5">
+                        <span
+                          className={`text-xs font-semibold ${
+                            results[row.id].status === 'success'
+                              ? 'text-green-700'
+                              : results[row.id].status === 'ambiguous'
+                                ? 'text-amber-600'
+                                : 'text-red-600'
+                          }`}
+                        >
+                          {results[row.id].modelCode || '—'}
+                        </span>
+                        <span className="text-[11px] text-gray-400 max-w-[160px] truncate" title={results[row.id].message}>
+                          {results[row.id].message}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-300">-</span>
+                    )}
+                  </td>
+                )}
 
                 <td className="px-4 py-3 text-right sticky right-0 bg-white z-10">
                   <button

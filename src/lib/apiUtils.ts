@@ -128,7 +128,7 @@ export function findExactMatch(map: Record<string, string>, rawValue: string): s
   return null;
 }
 
-function levenshtein(a: string, b: string): number {
+export function levenshtein(a: string, b: string): number {
   const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
   for (let i = 0; i <= a.length; i++) dp[i][0] = i;
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
@@ -201,6 +201,84 @@ export function describeCharDiff(raw: string, expected: string): string | null {
     return `Your value has ${raw.length} characters vs ${expected.length} expected — extra/missing character(s) at the end.`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Model Master search — used to discover the auto-generated Model Code
+// after a create, since addmodel_new_all.php's response doesn't include it.
+// ---------------------------------------------------------------------------
+
+export interface ModelListRow {
+  sno: string;
+  modelCode: string;
+  brand: string;
+  product: string;
+  model: string;
+  modelDesc: string;
+  editId: string | null;
+  status: string;
+}
+
+/**
+ * Parses model_master_new.php's search-results HTML into structured rows.
+ * Table layout: SNO | Model Code | Brand | Product | Model | Model Desc |
+ * Edit | Image Upload | Status.
+ */
+export function parseModelListHtml(html: string): ModelListRow[] {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  const rows: ModelListRow[] = [];
+
+  doc.querySelectorAll('table.hovertable tr').forEach((tr) => {
+    const cells = tr.querySelectorAll('td');
+    if (cells.length < 9) return; // header/spacer rows use <th> or fewer cells
+
+    const sno = cells[0]?.textContent?.trim() || '';
+    if (!/^\d+$/.test(sno)) return; // guard: a real data row starts with a plain row number
+
+    const modelCode = cells[1]?.textContent?.trim() || '';
+    const brand = cells[2]?.textContent?.trim() || '';
+    const product = cells[3]?.textContent?.trim() || '';
+    const model = cells[4]?.textContent?.trim() || '';
+    const modelDesc = cells[5]?.textContent?.trim() || '';
+    const status = cells[8]?.textContent?.trim() || '';
+
+    // Pull the numeric id out of the Edit link's onclick:
+    // edit_model_new.php?id=1849
+    const editLink = cells[6]?.querySelector('a');
+    const onclick = editLink?.getAttribute('onclick') || '';
+    const idMatch = onclick.match(/edit_model_new\.php\?id=(\d+)/);
+    const editId = idMatch ? idMatch[1] : null;
+
+    rows.push({ sno, modelCode, brand, product, model, modelDesc, editId, status });
+  });
+
+  return rows;
+}
+
+/**
+ * Searches the Model Master list by exact model name text
+ * (GET model_master_new.php?srch=...). Adds a cache-busting param since
+ * this is a plain server-rendered GET, not an API designed for polling.
+ */
+export async function searchModelsByName(modelName: string): Promise<ModelListRow[]> {
+  try {
+    const response = await api.get('/master/model_master_new.php', {
+      params: { srch: modelName, _: Date.now() },
+    });
+    return parseModelListHtml(response.data);
+  } catch (error) {
+    console.error(`Failed to search models for "${modelName}":`, error);
+    return [];
+  }
+}
+
+/** Outcome of attempting to create one row, including the resolved Model Code. */
+export interface RowResult {
+  modelCode: string | null;
+  status: 'success' | 'duplicate' | 'failed' | 'ambiguous';
+  message: string;
 }
 
 // ---------------------------------------------------------------------------

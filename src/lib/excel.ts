@@ -6,6 +6,9 @@ import {
   findExactMatch,
   suggestClosest,
   describeCharDiff,
+  levenshtein,
+  type RowResult,
+  type ModelListRow,
 } from './apiUtils';
 
 export const COLUMN_MAPPING: Record<string, string> = {
@@ -57,6 +60,70 @@ const STATIC_DROPDOWN_FIELDS = [
 // map (not in STATIC_DROPDOWN_FIELDS, not brand/category/model/sub-category,
 // not keyboard/model_typenew), so it passes through untouched by default.
 
+/**
+ * Reconstructs the exact "Model Desc" string the backend generates, based
+ * on the confirmed pattern:
+ *   {Brand} {Sub Category} {Model} {CPU Core} {CPU Gen} {CPU Speed}
+ *   HDD {HDD} RAM {RAM} {Display Size} {Graphic Type}
+ *
+ * NOTE: SSD, Color, Graphic Capacity, Display Type, Keyboard, and Optical
+ * Drive were NOT present in any confirmed sample (they were empty in all
+ * three examples used to derive this). If your backend does include them
+ * under some condition, this won't produce an exact match for those rows —
+ * pickCandidateByDescription() below falls back to closest-match in that
+ * case rather than failing silently.
+ */
+export function buildExpectedModelDescription(original: Record<string, string>): string {
+  const parts: string[] = [];
+  const push = (v?: string) => {
+    if (v) parts.push(v);
+  };
+
+  push(original.make);
+  push(original.sub_producd);
+  push(original.model);
+  push(original.cpu_core);
+  push(original.cpu_gen);
+  push(original.cpu_speed);
+  if (original.strg1) parts.push('HDD', original.strg1);
+  if (original.ram_cap) parts.push('RAM', original.ram_cap);
+  push(original.display_size);
+  push(original.gpu_type);
+
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Given several candidate rows that all match on model name (and brand),
+ * finds the one whose Model Desc matches our reconstructed description —
+ * exactly if possible, otherwise the closest by edit distance as a
+ * clearly-flagged best guess.
+ */
+export function pickCandidateByDescription(
+  candidates: ModelListRow[],
+  expectedDesc: string
+): { match: ModelListRow | null; exact: boolean } {
+  const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const target = normalize(expectedDesc);
+
+  for (const c of candidates) {
+    if (normalize(c.modelDesc) === target) {
+      return { match: c, exact: true };
+    }
+  }
+
+  let best: ModelListRow | null = null;
+  let bestDist = Infinity;
+  for (const c of candidates) {
+    const dist = levenshtein(normalize(c.modelDesc), target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = c;
+    }
+  }
+  return { match: best, exact: false };
+}
+
 export const downloadTemplate = () => {
   const headers = Object.keys(COLUMN_MAPPING);
   const worksheet = XLSX.utils.aoa_to_sheet([headers]);
@@ -65,6 +132,43 @@ export const downloadTemplate = () => {
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Bulk_Upload_Template');
   XLSX.writeFile(workbook, 'GoRevive_Model_Upload_Template.xlsx');
 };
+
+/**
+ * Exports every uploaded row — full human-readable field set, PLUS the
+ * auto-generated Model Code resolved via the before/after search diff,
+ * PLUS the upload outcome — as a downloadable Excel file.
+ */
+export function downloadResults(rows: ValidatedRow[], results: Record<string, RowResult>) {
+  const fieldHeaders = Object.keys(COLUMN_MAPPING);
+  const headers = [...fieldHeaders, 'Model Code', 'Upload Status', 'Message'];
+
+  const data = rows.map((row) => {
+    const result = results[row.id];
+    const line: Record<string, string> = {};
+
+    Object.entries(COLUMN_MAPPING).forEach(([label, key]) => {
+      line[label] = row.original[key] || '';
+    });
+
+    line['Model Code'] = result?.modelCode || '';
+    line['Upload Status'] = result
+      ? result.status
+      : row.isValid
+        ? 'Not uploaded'
+        : 'Validation failed';
+    line['Message'] = result?.message
+      || Object.values(row.errors).map((e) => e.message).join(' | ');
+
+    return line;
+  });
+
+  const worksheet = XLSX.utils.json_to_sheet(data, { header: headers });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Upload_Results');
+
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `GoRevive_Upload_Results_${dateStamp}.xlsx`);
+}
 
 /**
  * Builds a "did you mean X?" hint for the error message, or a generic
