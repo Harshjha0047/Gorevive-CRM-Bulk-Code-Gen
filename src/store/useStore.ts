@@ -102,6 +102,7 @@ export const useStore = create<AppState>((set, get) => ({
         params.append('Submit', 'ADD');
 
         const response = await api.post('/master/addmodel_new_all.php', params);
+        console.log(`submission response:`, response.data);
         const legacy = parseLegacyFormResponse(response.data);
 
         if (!legacy.success) {

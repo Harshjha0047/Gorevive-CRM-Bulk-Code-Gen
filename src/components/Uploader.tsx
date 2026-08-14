@@ -15,7 +15,6 @@ export function Uploader({ onDataParsed }: UploaderProps) {
     setIsProcessing(true);
     try {
       const rows = await parseAndValidateExcel(file);
-      console.log("Parsed and validated rows:", rows);
       onDataParsed(rows);
     } catch (error) {
       console.error("Failed to parse file:", error);

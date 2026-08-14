@@ -301,19 +301,31 @@ export interface LegacyFormResult {
 }
 
 const FAILURE_KEYWORDS = ['already available', 'already exist', 'error', 'fail', 'invalid', 'duplicate'];
-const SUCCESS_KEYWORDS = ['added successfully', 'success', 'record added', 'saved'];
+const SUCCESS_KEYWORDS = ['added successfully', 'success', 'record added', 'saved', 'inserted'];
 
 export function parseLegacyFormResponse(html: string): LegacyFormResult {
   if (typeof html !== 'string') {
     return { success: false, message: 'Unexpected response from server (not text).' };
   }
 
-  const match = html.match(/alert\((['"])(.*?)\1\)/i);
-  const message = match ? match[2].trim() : '';
+  // Most responses use <script>alert('...')</script>, but some (like the
+  // plain "Model has been inserted....." success page) have no alert() at
+  // all — just text wrapped directly in <BODY>. Try alert() first, then
+  // fall back to the page's stripped plain text.
+  const alertMatch = html.match(/alert\((['"])(.*?)\1\)/i);
+  let message = alertMatch ? alertMatch[2].trim() : '';
 
   if (!message) {
-    // No alert() found at all — treat unknown/empty responses as failures
-    // rather than silently assuming success.
+    message = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  if (!message) {
+    // No confirmation message received from server.
     return { success: false, message: 'No confirmation message received from server.' };
   }
 
