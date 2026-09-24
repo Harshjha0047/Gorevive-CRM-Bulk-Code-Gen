@@ -1,8 +1,10 @@
-import { useState } from 'react';
-import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle, ChevronDown, Wand2, Download } from 'lucide-react';
+import { memo, useCallback, useMemo, useState } from 'react';
+import { CheckCircle, XCircle, Trash2, UploadCloud, AlertCircle, ChevronDown, Wand2, Download, Search } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { COLUMN_MAPPING, getFieldOptions, downloadResults } from '../lib/excel';
 import type { ValidatedRow } from '../lib/validation';
+import { OptionListSkeleton } from './Skeletons';
+import { useDebounce } from '../lib/useDebounce';
 
 const COLUMNS = Object.entries(COLUMN_MAPPING).map(([label, key]) => ({ label, key }));
 
@@ -11,7 +13,7 @@ const COLUMNS = Object.entries(COLUMN_MAPPING).map(([label, key]) => ({ label, k
 // a one-click "Use '<suggestion>'" button when we have a close match, and a
 // "Pick from list" dropdown loaded on demand with every valid option.
 // ---------------------------------------------------------------------------
-function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
+const FieldCell = memo(function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
   const updateRowField = useStore((s) => s.updateRowField);
   const [showPicker, setShowPicker] = useState(false);
   const [options, setOptions] = useState<string[] | null>(null);
@@ -20,7 +22,7 @@ function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
   const value = row.original?.[fieldKey] || '';
   const error = row.errors?.[fieldKey];
 
-  const openPicker = async () => {
+  const openPicker = useCallback(async () => {
     setShowPicker((v) => !v);
     if (options === null && !loadingOptions) {
       setLoadingOptions(true);
@@ -31,7 +33,7 @@ function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
         setLoadingOptions(false);
       }
     }
-  };
+  }, [fieldKey, loadingOptions, options, row.original]);
 
   if (!error) {
     return <td className="px-4 py-3">{value || '-'}</td>;
@@ -68,9 +70,7 @@ function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
 
             {showPicker && (
               <div className="absolute z-30 mt-1 left-0 bg-white border border-gray-200 rounded-lg shadow-lg w-64 max-h-64 overflow-y-auto">
-                {loadingOptions && (
-                  <div className="px-3 py-2 text-xs text-gray-400">Loading options…</div>
-                )}
+                {loadingOptions && <OptionListSkeleton />}
                 {!loadingOptions && options !== null && options.length === 0 && (
                   <div className="px-3 py-2 text-xs text-gray-400">
                     No options available — fix a field this one depends on first (e.g. Brand).
@@ -95,10 +95,32 @@ function FieldCell({ row, fieldKey }: { row: ValidatedRow; fieldKey: string }) {
       </div>
     </td>
   );
-}
+});
 
 export function DataTable() {
-  const { rows, results, isUploading, uploadProgress, removeRow, clearRows, submitValidRows } = useStore();
+  // Selective subscriptions: each piece is read individually so a change to
+  // one slice (e.g. uploadProgress ticking during a bulk upload) doesn't
+  // force a re-render of components only interested in a different slice.
+  const rows = useStore((s) => s.rows);
+  const results = useStore((s) => s.results);
+  const isUploading = useStore((s) => s.isUploading);
+  const uploadProgress = useStore((s) => s.uploadProgress);
+  const removeRow = useStore((s) => s.removeRow);
+  const clearRows = useStore((s) => s.clearRows);
+  const submitValidRows = useStore((s) => s.submitValidRows);
+
+  const [searchInput, setSearchInput] = useState('');
+  // Debounced so typing doesn't re-filter (and re-render) potentially
+  // hundreds of rows on every keystroke — only 300ms after the user pauses.
+  const debouncedSearch = useDebounce(searchInput, 300);
+
+  const filteredRows = useMemo(() => {
+    const term = debouncedSearch.trim().toLowerCase();
+    if (!term) return rows;
+    return rows.filter((row) =>
+      Object.values(row.original).some((v) => v.toLowerCase().includes(term))
+    );
+  }, [rows, debouncedSearch]);
 
   if (rows.length === 0) return null;
 
@@ -174,6 +196,25 @@ export function DataTable() {
         </div>
       )}
 
+      {/* Search / filter */}
+      <div className="px-6 py-3 bg-white border-b border-gray-100">
+        <div className="relative max-w-sm">
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Filter rows (brand, model, HSN, ...)"
+            className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+          />
+        </div>
+        {searchInput && (
+          <p className="text-xs text-gray-400 mt-1.5">
+            Showing {filteredRows.length} of {rows.length} rows
+          </p>
+        )}
+      </div>
+
       {/* Scrollable Table — all columns rendered dynamically */}
       <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
         <table className="w-full text-sm text-left text-gray-500 whitespace-nowrap">
@@ -189,7 +230,7 @@ export function DataTable() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {filteredRows.map((row) => (
               <tr
                 key={row.id}
                 className={`border-b hover:bg-gray-50 transition-colors align-top ${!row.isValid ? 'bg-red-50/30' : ''}`}
@@ -248,6 +289,11 @@ export function DataTable() {
             ))}
           </tbody>
         </table>
+        {filteredRows.length === 0 && (
+          <div className="px-6 py-10 text-center text-sm text-gray-400">
+            No rows match "{searchInput}".
+          </div>
+        )}
       </div>
     </div>
   );

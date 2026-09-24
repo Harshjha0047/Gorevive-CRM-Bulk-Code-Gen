@@ -1,9 +1,14 @@
 import { api } from './api';
+import { getCached, setCached, clearAllCached, MASTER_DATA_TTL_MS } from './persistentCache';
 
 // ---------------------------------------------------------------------------
-// Full page -> JSON cache. Fetched ONCE per session, then reused everywhere.
+// Full page -> JSON cache. Fetched ONCE per session (in-memory), and also
+// persisted to localStorage so a page reload doesn't re-fetch/re-parse the
+// whole master data HTML page again within the TTL window.
 // ---------------------------------------------------------------------------
 export type MasterData = Record<string, Record<string, string>>;
+
+const MASTER_DATA_CACHE_KEY = 'masterData';
 
 let cachedMasterData: MasterData | null = null;
 
@@ -52,9 +57,18 @@ export function htmlToJson(htmlString: string): MasterData {
 export async function fetchMasterData(): Promise<MasterData> {
   if (cachedMasterData) return cachedMasterData;
 
+  // Check the persistent (localStorage) cache before hitting the network —
+  // survives reloads/new tabs within the TTL window.
+  const persisted = getCached<MasterData>(MASTER_DATA_CACHE_KEY);
+  if (persisted) {
+    cachedMasterData = persisted;
+    return cachedMasterData;
+  }
+
   try {
     const response = await api.get('/master/addmodel_new_all.php');
     cachedMasterData = htmlToJson(response.data);
+    setCached(MASTER_DATA_CACHE_KEY, cachedMasterData, MASTER_DATA_TTL_MS);
     return cachedMasterData;
   } catch (error) {
     console.error('Failed to fetch/parse master data page:', error);
@@ -89,11 +103,35 @@ function parseHtmlOptionsExact(htmlString: string): Record<string, string> {
 }
 
 const dynamicMapCache = new Map<string, Record<string, string>>();
+const DYNAMIC_MAP_TTL_MS = 30 * 60 * 1000; // 30 minutes, same freshness window as master data
+
+/**
+ * Drops ALL cached master/dynamic CRM data — in-memory AND localStorage —
+ * so the next fetch pulls fresh data from the server. Use this when
+ * something was added/changed directly in the PHP CRM (a new brand, model,
+ * category, etc.) and the frontend needs to see it without a full page
+ * reload (which would also wipe any in-progress uploaded rows).
+ */
+export function invalidateMasterDataCache(): void {
+  cachedMasterData = null;
+  dynamicMapCache.clear();
+  clearAllCached();
+}
 
 export async function fetchDynamicMap(action: string, value: string): Promise<Record<string, string>> {
   const cacheKey = `${action}:${value}`;
+
+  // 1. In-memory cache — fastest, covers repeated brands/categories within
+  //    the same session (e.g. many rows sharing a brand during bulk parse).
   if (dynamicMapCache.has(cacheKey)) {
     return dynamicMapCache.get(cacheKey)!;
+  }
+
+  // 2. Persistent (localStorage) cache — survives reloads/new tabs.
+  const persisted = getCached<Record<string, string>>(`dynamicMap:${cacheKey}`);
+  if (persisted) {
+    dynamicMapCache.set(cacheKey, persisted);
+    return persisted;
   }
 
   try {
@@ -106,6 +144,7 @@ export async function fetchDynamicMap(action: string, value: string): Promise<Re
     const map = parseHtmlOptionsExact(htmlPart);
 
     dynamicMapCache.set(cacheKey, map);
+    setCached(`dynamicMap:${cacheKey}`, map, DYNAMIC_MAP_TTL_MS);
     return map;
   } catch (error) {
     console.error(`Failed to fetch map for ${action} with value ${value}`, error);
@@ -301,7 +340,7 @@ export interface LegacyFormResult {
 }
 
 const FAILURE_KEYWORDS = ['already available', 'already exist', 'error', 'fail', 'invalid', 'duplicate'];
-const SUCCESS_KEYWORDS = ['added successfully', 'success', 'record added', 'saved', 'inserted'];
+const SUCCESS_KEYWORDS = ['added successfully', 'success', 'record added', 'saved', 'inserted', 'created'];
 
 export function parseLegacyFormResponse(html: string): LegacyFormResult {
   if (typeof html !== 'string') {
@@ -337,4 +376,126 @@ export function parseLegacyFormResponse(html: string): LegacyFormResult {
   const success = isFailure ? false : isSuccess ? true : false;
 
   return { success, message };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk Part Adder — addPart_new.php
+//
+// Unlike addmodel_new_all.php (which has a separate includes/getField.php
+// AJAX endpoint for brand/category-dependent lookups), this form is
+// self-resubmitting: method="post" action="" — every onChange does
+// document.a.submit() back to the SAME URL, and the server replies with
+// more of the form filled in (that's the difference between a "blank" and
+// "filled" capture of this page). Part Name is the one field that's only
+// revealed once enough of the form is chosen — everything else (Brand, HSN
+// Code, Sub Cat, Category, Original/Compatible) is either static or
+// already fetchable via the existing master-data / fetchDynamicMap calls
+// above, so this only needs to replicate the Part Name reveal step.
+//
+// NOT YET CONFIRMED against a live submission — parseLegacyFormResponse is
+// reused as-is (same success/failure keyword heuristics as the Model form),
+// but the Part form's actual response text hasn't been verified. If a real
+// submission's message doesn't get classified correctly, the raw message
+// is still shown to the user either way, so nothing is silently lost —
+// just flag any misclassification you see and it can be tuned.
+// ---------------------------------------------------------------------------
+
+const ADD_PART_URL = '/master/addPart_new.php';
+
+/**
+ * POSTs the given (partial) field state back to addPart_new.php and parses
+ * whatever <select> options come back in the response — same mechanism as
+ * the browser's own document.a.submit() cascade, just driven by us instead
+ * of an onChange handler. Used to reveal Part Name options once enough
+ * context (Sub Cat / Brand / Model / HSN Code) is known.
+ */
+export async function fetchPartFormState(fields: Record<string, string>): Promise<MasterData> {
+  try {
+    const params = new URLSearchParams();
+    Object.entries(fields).forEach(([key, value]) => {
+      if (value) params.append(key, value);
+    });
+
+    const response = await api.post(ADD_PART_URL, params);
+    return htmlToJson(response.data);
+  } catch (error) {
+    console.error('Failed to fetch Part form state:', error);
+    return {};
+  }
+}
+
+const PART_BLANK_STATE_CACHE_KEY = 'partFormBlankState';
+let cachedPartBlankState: MasterData | null = null;
+
+/**
+ * The form's blank/initial state — gives us Part Type, Sub Cat, HSN Code,
+ * Stock Category, and Original/Compatible in one shot, since none of those
+ * depend on Brand/Model being chosen first (confirmed static across both
+ * your "blank" and "filled" captures).
+ *
+ * Confirmed: this initial load is a plain GET (not a self-post) — POST is
+ * only used for the cascading reveals and the final create.
+ */
+export async function fetchPartFormBlankState(): Promise<MasterData> {
+  if (cachedPartBlankState) return cachedPartBlankState;
+
+  const persisted = getCached<MasterData>(PART_BLANK_STATE_CACHE_KEY);
+  if (persisted) {
+    cachedPartBlankState = persisted;
+    return cachedPartBlankState;
+  }
+
+  try {
+    const response = await api.get(ADD_PART_URL);
+    cachedPartBlankState = htmlToJson(response.data);
+  } catch (error) {
+    console.error('Failed to fetch Part form blank state:', error);
+    cachedPartBlankState = {};
+  }
+
+  if (Object.keys(cachedPartBlankState).length > 0) {
+    setCached(PART_BLANK_STATE_CACHE_KEY, cachedPartBlankState, MASTER_DATA_TTL_MS);
+  }
+  return cachedPartBlankState;
+}
+
+/** Outcome of attempting to create one Part row. */
+export interface PartRowResult {
+  status: 'success' | 'duplicate' | 'failed';
+  message: string;
+}
+
+/**
+ * Submits ONE Part (shared context fields + this part's specific fields)
+ * as a single POST with save=ADD appended — the submit button's actual
+ * name/value in this form (confirmed from your HTML), NOT "Submit=ADD"
+ * like the Model form uses.
+ */
+export async function submitPart(fields: Record<string, string>): Promise<PartRowResult> {
+  try {
+    const params = new URLSearchParams();
+    Object.entries(fields).forEach(([key, value]) => {
+      params.append(key, value);
+    });
+    params.append('save', 'ADD');
+
+    const response = await api.post(ADD_PART_URL, params);
+    const legacy = parseLegacyFormResponse(response.data);
+
+    if (legacy.success) {
+      return { status: 'success', message: legacy.message || 'Added' };
+    }
+
+    const isDuplicate = /already/i.test(legacy.message);
+    return {
+      status: isDuplicate ? 'duplicate' : 'failed',
+      message: legacy.message,
+    };
+  } catch (error) {
+    console.error('Failed to submit Part:', error);
+    return {
+      status: 'failed',
+      message: error instanceof Error ? error.message : 'Unknown error submitting part.',
+    };
+  }
 }

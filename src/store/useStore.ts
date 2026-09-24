@@ -1,8 +1,41 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { api } from '../lib/api';
 import { validateRow, buildExpectedModelDescription, pickCandidateByDescription } from '../lib/excel';
-import { parseLegacyFormResponse, searchModelsByName, type RowResult } from '../lib/apiUtils';
+import {
+  parseLegacyFormResponse,
+  searchModelsByName,
+  invalidateMasterDataCache,
+  fetchMasterData,
+  type RowResult,
+} from '../lib/apiUtils';
 import type { ValidatedRow } from '../lib/validation';
+
+// localStorage wrapper that never throws — if storage is full/unavailable,
+// persistence is skipped rather than crashing the app on every state update.
+const safeStorage = {
+  getItem: (name: string) => {
+    try {
+      return window.localStorage.getItem(name);
+    } catch {
+      return null;
+    }
+  },
+  setItem: (name: string, value: string) => {
+    try {
+      window.localStorage.setItem(name, value);
+    } catch (error) {
+      console.warn('Could not persist upload progress (storage full or unavailable):', error);
+    }
+  },
+  removeItem: (name: string) => {
+    try {
+      window.localStorage.removeItem(name);
+    } catch {
+      // ignore
+    }
+  },
+};
 
 interface AppState {
   rows: ValidatedRow[];
@@ -17,31 +50,45 @@ interface AppState {
     failed: number;
   };
 
+  /** True while a manual "Refresh CRM Data" is in progress. */
+  isRefreshingData: boolean;
+
   setRows: (rows: ValidatedRow[]) => void;
   removeRow: (id: string) => void;
   clearRows: () => void;
   submitValidRows: () => Promise<void>;
   updateRowField: (id: string, field: string, value: string) => Promise<void>;
+  /**
+   * Drops the cached brand/category/model/etc. dropdown data (so anything
+   * just added or changed directly in the PHP CRM is picked up), then
+   * re-validates every row currently loaded in the table against the fresh
+   * data — without losing the uploaded rows, unlike a full page reload.
+   */
+  refreshCrmData: () => Promise<void>;
 }
 
-export const useStore = create<AppState>((set, get) => ({
-  rows: [],
-  results: {},
+export const useStore = create<AppState>()(
+  persist(
+    (set, get) => ({
+      rows: [],
+      results: {},
 
-  isUploading: false,
-  uploadProgress: { current: 0, total: 0, success: 0, failed: 0 },
+      isUploading: false,
+      uploadProgress: { current: 0, total: 0, success: 0, failed: 0 },
+      isRefreshingData: false,
 
-  setRows: (rows) => set({ rows, results: {} }),
+      setRows: (rows) => set({ rows, results: {} }),
 
-  removeRow: (id) => set((state) => ({
-    rows: state.rows.filter(row => row.id !== id)
-  })),
+      removeRow: (id) => set((state) => ({
+        rows: state.rows.filter(row => row.id !== id)
+      })),
 
-  clearRows: () => set({
-    rows: [],
-    results: {},
-    uploadProgress: { current: 0, total: 0, success: 0, failed: 0 }
-  }),
+      clearRows: () => set({
+        rows: [],
+        results: {},
+        uploadProgress: { current: 0, total: 0, success: 0, failed: 0 }
+      }),
+
 
   updateRowField: async (id, field, value) => {
     const { rows } = get();
@@ -225,5 +272,49 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     set({ isUploading: false });
-  }
-}));
+      },
+
+      refreshCrmData: async () => {
+        set({ isRefreshingData: true });
+        try {
+          invalidateMasterDataCache();
+          await fetchMasterData();
+
+          // Re-validate every currently loaded row against the fresh data —
+          // sequential (not Promise.all) to match the same one-request-at-
+          // a-time pattern the initial Excel parse uses, so repeated
+          // brands/categories across rows only trigger one network call
+          // each rather than a burst of duplicate concurrent requests.
+          const { rows } = get();
+          const revalidated: ValidatedRow[] = [];
+          for (const row of rows) {
+            const result = await validateRow(row.original);
+            revalidated.push({
+              ...row,
+              data: result.data,
+              errors: result.errors,
+              isValid: result.isValid,
+            });
+          }
+
+          set({ rows: revalidated });
+        } finally {
+          set({ isRefreshingData: false });
+        }
+      },
+    }),
+    {
+      name: 'gorevive-crm-upload-state',
+      storage: createJSONStorage(() => safeStorage),
+      // Only persist the row grid + its results — never the transient
+      // upload-in-progress flags, so a reload never resumes "mid-upload".
+      partialize: (state) => ({ rows: state.rows, results: state.results }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.isUploading = false;
+          state.uploadProgress = { current: 0, total: 0, success: 0, failed: 0 };
+        }
+      },
+    }
+  )
+);
